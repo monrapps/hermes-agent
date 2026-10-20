@@ -1,0 +1,40 @@
+name: PR acceptance policy regression
+
+# Portable verification for forks without the upstream Blacksmith runner fleet.
+# This adds evidence; it does not replace the repository's existing CI gates.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Exact-head PR acceptance regression and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked Python and test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["all"]'
+          test-environment: 'true'
+      - name: Exercise acceptance, ownership and lifecycle contracts
+        run: >-
+          scripts/run_tests.sh -j 2
+          tests/hermes_cli/test_kanban_pr_acceptance.py
+          tests/hermes_cli/test_kanban_pr_explicit_policy.py
+          tests/hermes_cli/test_kanban_db.py
+          tests/hermes_cli/test_kanban_review_lifecycle.py
+          tests/hermes_cli/test_kanban_workflow.py
+          tests/hermes_cli/test_kanban_cli_exit_status.py
+          tests/hermes_cli/test_kanban_write_guard.py
+          tests/hermes_cli/test_config_effective.py
+      - name: Run all blocking lint gates
+        run: python scripts/check

@@ -73,13 +73,13 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:8] == cache_sig:
+        if not fail_closed and cached is not None and cache_sig is not None and cached[:8] == cache_sig:
             if all(_config._env_ref_lookup(k) == v for k, v in cached[9].items()):
                 return copy.deepcopy(cached[8])
 
         raw: dict[str, Any] = {}
         recovered = False
-        raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
+        raw_hit = None if fail_closed else _config._RAW_CONFIG_CACHE.get(path_key)
         if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig:
             raw = copy.deepcopy(raw_hit[4])  # one parse per process, shared with read_raw_config()
             _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
@@ -87,6 +87,8 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
             try:
                 with open(config_path, encoding="utf-8-sig") as f:
                     loaded = fast_safe_load(f)
+                if fail_closed and not isinstance(loaded, dict):
+                    raise ValueError("config.yaml root must be a mapping")
             except Exception as exc:
                 if fail_closed:
                     raise

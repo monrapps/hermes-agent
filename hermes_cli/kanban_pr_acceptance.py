@@ -14,7 +14,11 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from urllib.parse import quote
+
+from hermes_cli.kanban_pr_evidence import checked_runs
+from hermes_cli.kanban_pr_policy import (
+    PolicyError, explicit_binding, explicit_requirements, load_policy, pr_open_or_merged, repository_requirements,
+)
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -120,35 +124,26 @@ def collect_acceptance(contract: str, published_pr: str | None,
             return receipt
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
-        owner, name = repo.split("/")
-        query = f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)}){{pullRequest(number:{number:d}){{headRefOid baseRefName state\n            baseRef{{branchProtectionRule{{requiredStatusChecks{{context app{{databaseId}}}}}}}}}}}}}}'
-        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
-        if repository is None:
-            # A private repo the login cannot read resolves to null, not an error.
-            raise _GateAuthError(f"HTTP 404 on graphql {repo}")
-        pr = repository["pullRequest"]
-        sha, branch = pr["headRefOid"], pr["baseRefName"]
+        policy, policy_home = load_policy(repo, profile_home)
+        receipt["policy_source"] = "config:kanban.pr_acceptance_policies" if policy else "repository"
+        if policy:
+            receipt["policy_scope"] = {"profile_home": policy_home, "repository": repo,
+                                       "base_branch": policy["base_branch"]}
+            sha, branch, required, base_sha = explicit_requirements(repo, number, policy, profile_home)
+            receipt["base_sha"] = base_sha
+        else:
+            sha, branch, required = repository_requirements(repo, number, profile_home)
         receipt["head_sha"] = sha
-        if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
-            raise ValueError("PR is closed or current head is unavailable")
-        protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
-        for page in rules:
-            for rule in page:
-                if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
+        receipt["base_branch"] = branch
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ValueError("PR current head is unavailable")
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
                      paginate=True, profile_home=profile_home)
-        runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
-            raise ValueError("Incomplete check-run pagination")
+        runs = checked_runs(pages)
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
         outcomes = []
@@ -157,26 +152,36 @@ def collect_acceptance(contract: str, published_pr: str | None,
                         (app_id in (None, -1) or r["app"]["id"] == app_id)]
             # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
             legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
-            selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
+            selected = [(r, True) for r in matching]
+            if legacy:
+                selected.append((max(legacy, key=lambda s: s["id"]), False))
             if not selected:
                 outcomes.append("missing")
                 receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-            for check in selected:
-                is_run = "conclusion" in check
+            for check, is_run in selected:
                 outcome = check.get("conclusion") if is_run else check["state"]
                 classification = _classify(check, sha, outcome, is_run)
                 outcomes.append(classification)
                 receipt["checks"].append({"name": context, "id": check["id"],
                     "url": check.get("html_url") or check.get("target_url"),
                     "head_sha": check.get("head_sha", check.get("sha")),
+                    "app_id": (check.get("app") or {}).get("id"),
                     "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-        if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
+        if policy:
+            unchanged = explicit_binding(current, repo, number, branch) == (sha, receipt["base_sha"])
+        else:
+            unchanged = (current["head"]["sha"] == sha and current["base"]["ref"] == branch
+                         and pr_open_or_merged(current))
+        if not unchanged:
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
+        return receipt
+    except PolicyError as exc:
+        receipt.update(classification="config", detail=str(exc))
         return receipt
     except _GateAuthError as exc:
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"
