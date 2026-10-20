@@ -86,13 +86,72 @@ human action is needed. Generic GitHub `failure` cannot establish whether a test
 or artifact upload failed; inspect its retained URL. Explicit infrastructure
 conclusions and API failures are classified separately. No extra worker is spawned.
 
-Receipt persistence and the terminal write recheck run/status/contract ownership
+Receipt persistence and the terminal write recheck run/status/contract/assignee ownership
 under one SQLite lock: a reclaimed worker cannot complete or attach acceptance to
 the new run. The final GitHub read is a completion-time snapshot, not a distributed
 transaction or a continuous post-completion monitor. This is a single-user lifecycle
 guard, not OS isolation against arbitrary direct database writes. GitHub Enterprise
 is not covered. Related publication/lifecycle work: #91230, #84254, #52311; local
 verification and publication alone are not remote acceptance.
+
+### Explicit CI requirements (no protection API)
+
+Private repositories whose GitHub plan does not expose branch protection can opt
+into an **operator-owned** policy. This is a deliberate alternative source of
+requirements, never an automatic fallback on 401/403/404 or an API outage.
+Configure it in the **assignee profile**, using the supported config CLI:
+
+```bash
+hermes -p default config set kanban.pr_acceptance_policies '{"acme/private":{"mode":"explicit","base_branch":"main","required_checks":[{"context":"Tests","app_id":15368},{"context":"Build","app_id":15368}]}}'
+```
+
+This sets the mapping; preserve other repository entries when updating it (or use
+`config set kanban.pr_acceptance_policies.acme/private '<policy JSON>'` to update
+only that entry). Each entry requires exactly `mode: explicit`, a valid exact
+`base_branch`, and a nonempty `required_checks` list of unique exact `context`
+names with positive integer `app_id` pins. Obtain names and app IDs from the real
+repository's check-runs API; legacy commit statuses cannot satisfy pinned checks.
+Malformed settings or unreadable YAML fail closed with `classification=config`.
+No entry for a repository means the original GitHub protection/ruleset policy;
+a base-branch mismatch fails rather than falling back to a different policy.
+
+Explicit evaluations call only REST PR, exact-head check-runs and commit-status
+endpoints. They never query GraphQL `branchProtectionRule`, `/rules/branches` or
+`/branches/*/protection`. Every configured check must have `success` on the exact
+head; missing/pending/failure/cancelled/skipped/neutral/stale evidence and incomplete
+pagination remain refusals. The final head/base read, immutable PR binding,
+assignee credential isolation and SQLite run/ownership checks still apply.
+The receipt records `policy_source`, profile/repository/base scope, required
+contexts/app IDs, observed check app IDs, IDs, URLs, conclusions and head SHA.
+This does **not** approve product QA, waive graph dependencies, merge, or deploy.
+
+For read-only diagnostics, start a **fresh process from the reviewed checkout**
+with its dependency environment and the legitimate profile context:
+
+```bash
+# In a PM checkout, bootstrap this checkout's committed dependencies first.
+python -c 'import hermes_bootstrap; import runpy; runpy.run_module("hermes_cli.kanban_pr_probe", run_name="__main__")' \
+  --contract https://github.com/acme/private/pull/6 \
+  --published-pr https://github.com/acme/private/pull/6 --assignee default
+```
+
+The JSON report includes the collector path and actual `gh api` endpoints observed
+through Python's audit hook (no credential/environment dump). Exit 0 means accepted;
+exit 1 means refused. No board is opened or mutated, and the report cannot be
+submitted as a precomputed receipt: the lifecycle owner must recollect at the real
+completion boundary. Preserve live claims and active-PR respawn guards. A legitimate
+owner may use that same reviewed checkout's normal completion command/tool after
+all dependencies are satisfied; do not remove guards, fake assignees or change a
+PR contract to `local-only` to release QA.
+
+Settings remain in the profile's `config.yaml` across normal updates. Code support
+must also be present: an older running gateway does not gain this mode from a config
+write. Until the reviewed version is adopted through the normal drain/restart
+workflow, use fresh processes pinned to that checkout; never hot-reload or copy a
+collector into a live runtime. Workers with frozen configs retain their admitted
+settings; cross-profile acceptance from a frozen caller refuses and needs a fresh
+owner process. Rollback is to remove the specific mapping entry with `config unset`
+(and select the prior runtime); this restores protection-based policy, not acceptance.
 
 ## Kanban vs. `delegate_task`
 
