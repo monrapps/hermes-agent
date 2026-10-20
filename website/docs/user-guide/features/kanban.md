@@ -119,7 +119,9 @@ Explicit evaluations call only REST PR, exact-head check-runs and commit-status
 endpoints. They never query GraphQL `branchProtectionRule`, `/rules/branches` or
 `/branches/*/protection`. Every configured check must have `success` on the exact
 head; missing/pending/failure/cancelled/skipped/neutral/stale evidence and incomplete
-pagination remain refusals. The final head/base read, immutable PR binding,
+pagination remain refusals. Explicit policy requires an OPEN, unmerged PR on both
+reads, with matching PR number/URL and destination repository; its base commit SHA
+must also remain unchanged. The final head/base read, immutable PR binding,
 assignee credential isolation and SQLite run/ownership checks still apply.
 The receipt records `policy_source`, profile/repository/base scope, required
 contexts/app IDs, observed check app IDs, IDs, URLs, conclusions and head SHA.

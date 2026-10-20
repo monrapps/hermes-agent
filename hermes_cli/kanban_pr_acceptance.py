@@ -17,7 +17,7 @@ from pathlib import Path
 
 from hermes_cli.kanban_pr_evidence import checked_runs
 from hermes_cli.kanban_pr_policy import (
-    PolicyError, explicit_requirements, load_policy, pr_open_or_merged, repository_requirements,
+    PolicyError, explicit_binding, explicit_requirements, load_policy, pr_open_or_merged, repository_requirements,
 )
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -129,7 +129,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if policy:
             receipt["policy_scope"] = {"profile_home": policy_home, "repository": repo,
                                        "base_branch": policy["base_branch"]}
-            sha, branch, required = explicit_requirements(repo, number, policy, profile_home)
+            sha, branch, required, base_sha = explicit_requirements(repo, number, policy, profile_home)
+            receipt["base_sha"] = base_sha
         else:
             sha, branch, required = repository_requirements(repo, number, profile_home)
         receipt["head_sha"] = sha
@@ -168,7 +169,12 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-        if current["head"]["sha"] != sha or current["base"]["ref"] != branch or not pr_open_or_merged(current):
+        if policy:
+            unchanged = explicit_binding(current, repo, number, branch) == (sha, receipt["base_sha"])
+        else:
+            unchanged = (current["head"]["sha"] == sha and current["base"]["ref"] == branch
+                         and pr_open_or_merged(current))
+        if not unchanged:
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")

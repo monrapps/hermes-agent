@@ -38,7 +38,10 @@ def explicit_github(tmp_path, monkeypatch):
                 self.send_error(403, "Protection APIs forbidden by explicit policy")
                 return
             if "/pulls/" in self.path:
-                value = {"head": {"sha": state["head"]}, "base": {"ref": state["branch"]},
+                value = {"head": {"sha": state["head"]},
+                         "base": {"ref": state["branch"], "sha": state.get("base_sha", "c" * 40),
+                                  "repo": {"full_name": state.get("base_repo", REPO)}},
+                         "number": state.get("number", 6), "html_url": PR,
                          "state": state.get("pr_state", "closed" if state.get("closed") else "open"),
                          "merged": state.get("merged", False)}
             elif "/check-runs" in self.path:
@@ -131,7 +134,7 @@ def test_explicit_policy_completes_from_pinned_exact_head_without_protection(exp
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("fault", ["failure", "cancelled", "skipped", "neutral", "timed_out", None,
+@pytest.mark.parametrize("fault", ["merged_initial", "merged_final", "base_sha", "base_repo", "pr_number", "failure", "cancelled", "skipped", "neutral", "timed_out", None,
     "pending", "missing", "app", "stale", "count", "duplicate", "head", "base", "closed", "invalid_head", "initial_base", "malformed", "http_failure", "run_without_conclusion", "final_state", "merged_string", "float_app", "null_id", "string_id", "no_url", "float_count"])
 def test_explicit_policy_rejects_incomplete_or_changed_evidence(explicit_github, fault):
     state, _ = explicit_github
@@ -142,6 +145,13 @@ def test_explicit_policy_rejects_incomplete_or_changed_evidence(explicit_github,
     faults = {**flags, "initial_base": {"branch": "other"}, "invalid_head": {"head": "not-a-sha"},
               "merged_string": {"closed": True, "merged": "false"}}
     state.update(faults.get(fault, {"conclusion": fault}))
+    if fault == "merged_initial":
+        state.update(conclusion="success", closed=True, merged=True)
+    if fault == "merged_final":
+        state["conclusion"] = "success"
+        state["race"] = lambda: state.update(closed=True, merged=True)
+    changes.update(base_sha=("base_sha", "d" * 40), base_repo=("base_repo", "other/private"),
+                   pr_number=("number", 7))
     if fault in changes:
         state["conclusion"] = "success"
         def change():

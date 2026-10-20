@@ -79,17 +79,27 @@ def pr_open_or_merged(pr) -> bool:
     return pr["state"] == "open" or (pr["state"] == "closed" and pr.get("merged") is True)
 
 
+def explicit_binding(pr, repo, number, branch):
+    """Bind both reads to the same OPEN PR, destination repository and base commit."""
+    if (type(pr["number"]) is not int or pr["number"] != number
+            or pr["html_url"] != f"https://github.com/{repo}/pull/{number}"
+            or pr["base"]["repo"]["full_name"] != repo or pr["base"]["ref"] != branch
+            or pr["state"] != "open" or pr.get("merged") is not False):
+        raise ValueError("Explicit acceptance requires the bound OPEN PR and base repository")
+    binding = pr["head"]["sha"], pr["base"]["sha"]
+    if not all(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) for sha in binding):
+        raise ValueError("Explicit PR head/base commit is unavailable")
+    return binding
+
+
 def explicit_requirements(repo, number, policy, profile_home):
     from hermes_cli.kanban_pr_acceptance import _api
 
     pr = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-    branch = pr["base"]["ref"]
-    if branch != policy["base_branch"]:
-        raise PolicyError("PR base does not match the configured explicit policy branch.")
-    if not pr_open_or_merged(pr):
-        raise ValueError("PR is closed without merge")
+    branch = policy["base_branch"]
+    sha, base_sha = explicit_binding(pr, repo, number, branch)
     required = {(r["context"], r["app_id"]) for r in policy["required_checks"]}
-    return pr["head"]["sha"], branch, required
+    return sha, branch, required, base_sha
 
 
 def repository_requirements(repo, number, profile_home):
