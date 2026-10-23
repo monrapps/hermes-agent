@@ -427,9 +427,52 @@ orchestration attention. This is a deterministic DB guard, not an LLM judgment c
 a task's body text cannot opt out of it: the recurrence counter deliberately
 survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
-parent, missing input, unmet capability) before unblocking, or raise
-`BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+parent, missing input, unmet capability) before unblocking.
 :::
+
+### Human escalation is not specification triage
+
+The `triage` column contains two distinct kinds of work. Rough ideas are
+executable specification backlog. Cards carrying `block_kind=needs_input` or
+`capability`, or an exhausted `block_recurrences` counter (including transient
+and untyped loops), are **human escalation**, not another engineering attempt.
+Both automatic sweeps and explicit `specify`/`decompose` calls skip these cards
+without calling a model. Their persistence transactions reject stale model
+responses too: no scope rewrite, owner reassignment, child graph, or promotion
+can be produced from an in-flight specification after human escalation.
+The dispatcher does not claim `triage`; a comment or a body prefix alone does
+not authorize resumption. Existing typed metadata also protects legacy cards;
+there is no automatic data migration or rewriting of old runs.
+
+An authorized lifecycle owner can recover a parked escalation into sticky
+`blocked` **without resolving it**. Use the existing `block` command, keeping
+its exact stored kind (for example, `needs_input`):
+
+```bash
+# Inspect the exact board/card first; do not run from a task-owned worker.
+hermes kanban --board <board> show <id> --json
+hermes kanban --board <board> block <id> --kind needs_input "Metadata recovery only; original personal gate remains unresolved"
+hermes kanban --board <board> show <id> --json
+```
+
+This supported `triage -> blocked` repair appends a `blocked` event with
+`recovered_from_triage=true`, the preserved recurrence count, and source-phase
+provenance. It changes no title/body/assignee, failure budget/evidence, terminal
+run, or dependency edge. The CLI also records the supplied reason as a comment.
+A typed cause cannot be swapped; an old run assertion, active claim/worker or
+unclosed run makes the repair fail closed. Ordinary specification triage is not
+eligible for this repair. No SQL patch, scheduling workaround, counter reset,
+or temporary unassignment is necessary.
+
+Verify `status=blocked`, the recovery event and preserved history, then observe
+subsequent normal ticks: there must be no new specification/decomposition,
+claims, runs, child cards, or promotions for this unresolved gate. Do not use
+`unblock` as part of recovery. Only after the owner supplies the missing input
+or approval and records the new evidence should the existing explicit
+`unblock` transition be used. It restores `review`/`ready` or waits in `todo`
+for incomplete parents, preserving recurrence memory. Recovery and approval
+are separate actions; this lifecycle fix does not change authorization policy,
+install itself, or prove that a live incident has been recovered.
 
 ## Enabling tools for a chat profile
 
@@ -779,7 +822,7 @@ hermes dashboard        # "Kanban" tab appears in the nav, after "Skills"
 
 - A **Kanban** tab showing one column per status: `triage`, `todo`, `ready`, `running`, `blocked`, `done` (plus `archived` when the toggle is on).
   - Queue columns list cards in dispatch order (priority, then oldest first — top card spawns next). The `done` column is history and lists newest-completed first; `hermes kanban list --status done --sort completed-desc` gives the same order on the CLI.
-  - `triage` is the parking column for rough ideas. By default (`kanban.auto_decompose: true`), the dispatcher auto-runs the **decomposer** on tasks that land here. The built-in decomposer uses the `auxiliary.kanban_decomposer` model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. The original task stays alive as the parent of every child so its assignee (`kanban.orchestrator_profile`, else the assignee the task already had, else the active default profile) wakes back up to judge completion when everything finishes. Flip the **Orchestration: Auto/Manual** pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing `config.yaml` directly. Both modes coexist with `hermes kanban specify` - that's still available as a single-task spec rewrite when you don't want fan-out.
+  - `triage` holds rough ideas and human escalations. By default (`kanban.auto_decompose: true`), the dispatcher auto-runs the **decomposer** only on executable rough ideas; human escalations described above stay parked. The built-in decomposer uses the `auxiliary.kanban_decomposer` model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. The original task stays alive as the parent of every child so its assignee (`kanban.orchestrator_profile`, else the assignee the task already had, else the active default profile) wakes back up to judge completion when everything finishes. Flip the **Orchestration: Auto/Manual** pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing `config.yaml` directly. Both modes coexist with `hermes kanban specify` - that's still available as a single-task spec rewrite when you don't want fan-out.
 - Cards show the task id, title, priority badge, tenant tag, assigned profile, comment/link counts, a **progress pill** (`N/M` children done when the task has dependents), and "created N ago". A per-card checkbox enables multi-select.
 - **Per-profile lanes inside Running** — toolbar checkbox toggles sub-grouping of the Running column by assignee.
 - **Live updates via WebSocket** — the plugin tails the append-only `task_events` table on a short poll interval; the board reflects changes the instant any profile (CLI, gateway, or another dashboard tab) acts. Reloads are debounced so a burst of events triggers a single refetch.
