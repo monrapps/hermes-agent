@@ -3148,12 +3148,10 @@ def block_task(
     toward the loop breaker so a forever-flaky task escalates. True on any
     transition.
 
-    An already-``blocked`` card that the failure breaker parked UNTYPED
-    (``block_kind IS NULL``, no live run) is classified in place when *kind*
-    is supplied: ``block_kind``/``block_recurrences`` are set and a ``blocked``
-    audit event is appended, while status, failure evidence and the terminal
-    runs stay exactly as the breaker left them. A typed block, a card with a
-    live run, or a kind-less call on a blocked card are still refused.
+    A parked untyped breaker block can be classified in place. Human triage
+    can be recovered to sticky ``blocked`` with the SAME kind (no stale run
+    assertion); scope, owner, failure history, recurrences and terminal runs
+    survive. This recovery is not resolution or permission to execute.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3163,13 +3161,12 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
-        # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
-        # ``block_kind`` and no ``blocked`` event -- the policy is the
-        # supervisor's, not the kernel's -- but the transition guard below only
-        # matches running/ready, so that policy could never be attached later
-        # (#117363). Classify in place; never re-type or flap status. A caller
-        # asserting run ownership (``expected_run_id``) cannot own a parked
-        # card -- its run is over -- so it is refused like any stale worker.
+        if cur_row["status"] == "triage":
+            from hermes_cli.kanban_triage import recover_human_triage
+            return recover_human_triage(
+                conn, task_id, cur_row, kind=kind, reason=reason, expected_run_id=expected_run_id,
+            )
+        # Classify the failure breaker's untyped block without rewriting runs (#117363).
         if cur_row["status"] == "blocked":
             if kind is None or expected_run_id is not None or _row_get(cur_row, "block_kind") is not None:
                 return False
@@ -3752,19 +3749,20 @@ def specify_triage_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, assignee: Optional[str] = None, author: Optional[str] = None,
 ) -> bool:
-    """Update title/body/assignee (when given) and move ``triage -> todo`` in one
-    txn; False when not in triage. Lands in ``todo`` (not ``ready``) so parent
-    gating still applies; the audit comment is written only when a field changed.
+    """Specify executable triage atomically; reject human escalation even when
+    an auxiliary response was already in flight. Parent gating still applies.
     """
+    from hermes_cli.kanban_triage import requires_human_triage
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
+            "SELECT title, body, assignee, block_kind, block_recurrences "
+            "FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
-        if existing is None:
+        if existing is None or requires_human_triage(existing["block_kind"], existing["block_recurrences"]):
             return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
@@ -3799,8 +3797,7 @@ def specify_triage_task(
             conn, task_id, "specified",
             {"changed_fields": changed_fields} if changed_fields else None,
         )
-    # Own IMMEDIATE txn (outside the one above): a parent-free specified task
-    # flips to 'ready' now instead of idling until the next tick.
+    # Separate txn: parent-free work becomes ready without waiting for a tick.
     recompute_ready(conn)
     return True
 

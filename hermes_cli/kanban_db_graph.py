@@ -103,6 +103,7 @@ def decompose_triage_task(
         _canonical_assignee, _link, _append_event, _insert_comment,
         write_txn, recompute_ready,
     )
+    from hermes_cli.kanban_triage import requires_human_triage
 
     if not children:
         return None
@@ -115,10 +116,12 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, block_kind, block_recurrences "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
+            return None
+        if requires_human_triage(root_row["block_kind"], root_row["block_recurrences"]):
             return None
         # Dependency links alone do not imply lineage. The completion event is
         # committed with the graph, and survives re-triage or unlinking.

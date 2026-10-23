@@ -337,7 +337,10 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Executable specification backlog only; never sweep human escalation."""
+    from hermes_cli.kanban_triage import requires_human_triage
+
     with kbc.connect_closing() as conn:
-        rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        rows = kb.list_tasks(conn, status="triage", tenant=tenant)
+    # Apply the sweep cap AFTER excluding escalation; parked cards cannot starve real specs.
+    return [row.id for row in rows if not requires_human_triage(row.block_kind, row.block_recurrences)][:1000]
